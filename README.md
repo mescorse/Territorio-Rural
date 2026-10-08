@@ -40,11 +40,16 @@ Dados de exemplo também podem ser gerados com `python ferramentas/gerar_exemplo
 
 ## Instalação (a partir do código)
 
-Requer Python 3.11 ou mais novo.
+Requer Python 3.11 ou mais novo. Comando único (uma vez só):
 
 ```
-pip install -e .
+py -m pip install -e .
 ```
+
+Mesmo sem esse comando, o programa confere as bibliotecas toda vez que abre e, se faltar alguma
+(shapely, lxml, pyproj, numpy) ou se estiver antiga, instala sozinho na primeira vez, mostrando o
+progresso no rodapé da janela (ou no terminal, pela linha de comando). O `RecortaMapas.exe` já vem
+com tudo e não instala nada.
 
 ## Uso
 

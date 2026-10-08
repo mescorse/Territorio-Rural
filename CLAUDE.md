@@ -23,10 +23,14 @@ Usado por irmãos da congregação, não só pelo autor: a tela principal precis
 5. **Lembrar entre execuções** em `%APPDATA%\RecortaMapas` (fora da pasta do programa).
 6. Leitura de CSV e processamento rodam em segundo plano; só a thread principal mexe no Tk
    (fila + `after`).
+7. **Dependências** (`dependencias.py`): rodando do código, a janela confere na abertura se as
+   bibliotecas existem (`find_spec`, ~0,3 ms) e instala sozinha o que falta, sem botão, com
+   progresso no rodapé; as versões (metadados, ~15 ms) são conferidas em segundo plano depois que a
+   janela aparece. A linha de comando faz o mesmo antes de processar. O .exe (`sys.frozen`) pula tudo.
 
 ## Números atuais (Linux, Xvfb)
 
-- Abertura da janela com arquivos salvos: ~70–85 ms (1ª vez ~140 ms, desenha e grava o cache do tema).
+- Abertura da janela com arquivos salvos: ~90–105 ms (1ª vez ~140 ms, desenha e grava o cache do tema).
 - Troca de página: 2–9 ms (Casas ~35 ms quando precisa redesenhar após ler o CSV).
 
 ## Estrutura

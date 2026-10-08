@@ -17,7 +17,7 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from .. import preferencias
+from .. import dependencias, preferencias
 from ..atributos import montar_nome, resolver_padroes
 from ..config import (
     AGRUPAR_SEQUENCIAL, AGRUPAR_TERRITORIO, CNEFE_COLUNA_ESPECIE, MODO_CORTAR, MODO_INTEIRA,
@@ -45,18 +45,9 @@ LIMITES = (
 )
 
 
-PACOTES = ("shapely", "lxml", "pyproj", "numpy")
-
-
-def pacotes_faltando() -> list[str]:
-    """Bibliotecas necessárias que não estão instaladas (sem importá-las: é instantâneo)."""
-    from importlib.util import find_spec
-    return [p for p in PACOTES if find_spec(p) is None]
-
-
 def mensagem_pacotes(faltando) -> str:
     return (f"Falta instalar: {', '.join(faltando)}. Num terminal, na pasta do projeto, rode:  "
-            "py -m pip install -e .   (o RecortaMapas.exe já vem com tudo)")
+            f"{dependencias.comando_manual()}   (o RecortaMapas.exe já vem com tudo)")
 
 
 def eh_csv(caminho: str) -> bool:
@@ -94,7 +85,8 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.fechar)
 
         self.op: Opcoes = preferencias.carregar()
-        self.faltam_pacotes = pacotes_faltando()
+        self.faltam_pacotes = dependencias.ausentes()   # rápido; versões são conferidas depois
+        self.instalando = bool(self.faltam_pacotes) and dependencias.pode_instalar()
         self.fila: queue.Queue = queue.Queue()
         self.infos: dict[str, object] = {}        # caminho do CSV -> InfoCSV
         self.valores: dict[tuple, object] = {}    # (caminho, coluna) -> Counter
@@ -116,6 +108,12 @@ class App(tk.Tk):
         self.deiconify()
         dark_title_bar(self)
         self._timer = self.after(100, self._ler_fila)
+        if self.faltam_pacotes and dependencias.pode_instalar():
+            self.after(50, self._instalar_dependencias)
+        elif dependencias.pode_instalar():
+            # Versões antigas: conferidas em segundo plano, sem atrasar a abertura.
+            threading.Thread(target=lambda: self.fila.put(("dep_versoes", dependencias.faltando())),
+                             daemon=True).start()
         # Ler os CSV só depois que a janela aparece, para não atrasar a abertura.
         self.after(30, lambda: [self._inspecionar(p) for p in self.op.pontos if eh_csv(p.caminho)])
         self.tempo_abertura_ms = (time.perf_counter() - inicio) * 1000
@@ -357,6 +355,22 @@ class App(tk.Tk):
     def casas_largura(self) -> int:
         w = self.casas.master.winfo_width() if hasattr(self, "casas") else 0
         return int((w - 24) * 0.92) if w > 50 else 640
+
+    def _instalar_dependencias(self):
+        """Instala sozinho o que falta (só ao rodar do código-fonte), sem travar a janela."""
+        self.instalando = True
+        pacotes = list(self.faltam_pacotes)
+        self.validar()
+
+        def trabalho():
+            try:
+                ok, log = dependencias.instalar(
+                    pacotes, lambda l: self.fila.put(("dep_progresso", dependencias.resumo_pip(l))))
+            except Exception as exc:  # noqa: BLE001 - mostrado na tela
+                ok, log = False, str(exc)
+            self.fila.put(("dep_fim", (ok, log)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
 
     def _csvs(self) -> list[EntradaPontos]:
         return [p for p in self.op.pontos if eh_csv(p.caminho)]
@@ -801,6 +815,11 @@ class App(tk.Tk):
         if self.processando:
             return False
         erros = list(getattr(self, "erros_opcoes", []))
+        if getattr(self, "instalando", False):
+            self.bt_processar.state(["disabled"])
+            if not self.msg.cget("text").startswith("Instalando"):
+                self.dizer("Instalando as bibliotecas necessárias (só desta vez)…", "muted")
+            return False   # o rodapé mostra o progresso da instalação
         if getattr(self, "faltam_pacotes", None):
             erros.insert(0, mensagem_pacotes(self.faltam_pacotes))
         for p in self._csvs():
@@ -866,6 +885,27 @@ class App(tk.Tk):
                     s = time.perf_counter() - self.inicio_proc
                     self.validar()
                     self.dizer(f"Concluído em {num(s, 1)} s. Arquivos em {encurtar(valor.pasta_saida, 50)}", "text")
+                elif tipo == "dep_progresso":
+                    if valor:
+                        self.dizer("Instalando as bibliotecas necessárias (só desta vez)…  " + valor, "muted")
+                elif tipo == "dep_versoes":
+                    if valor and not self.instalando and not self.processando:
+                        self.faltam_pacotes = valor
+                        self.instalando = True
+                        self._instalar_dependencias()
+                elif tipo == "dep_fim":
+                    ok, log = valor
+                    self.instalando = False
+                    self.faltam_pacotes = dependencias.ausentes()   # rápido; versões são conferidas depois
+                    if ok and not self.faltam_pacotes:
+                        self.validar()
+                        if not self.faltando():
+                            self.dizer("Bibliotecas instaladas. Tudo pronto: clique em Processar.", "muted")
+                    else:
+                        self.validar()
+                        ultima = log.strip().splitlines()[-1] if log.strip() else ""
+                        self.dizer(f"Não deu para instalar sozinho ({ultima[:120]}). "
+                                   + mensagem_pacotes(self.faltam_pacotes or ["bibliotecas"]), "danger")
                 elif tipo == "erro":
                     self.processando = False
                     exc, tb = valor

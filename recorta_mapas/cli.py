@@ -142,6 +142,14 @@ def main(argv: list[str] | None = None) -> int:
         a, _ = p.parse_known_args(argv)
         return _listar_valores(a)
     a = criar_parser().parse_args(argv)
+    from . import dependencias
+    falta = dependencias.faltando()
+    if falta:
+        print(f"Instalando as bibliotecas necessárias (só desta vez): {', '.join(falta)}…", file=sys.stderr)
+        ok, log = dependencias.instalar(falta, lambda l: (r := dependencias.resumo_pip(l)) and print("  " + r, file=sys.stderr))
+        if not ok:
+            print(f"ERRO: não deu para instalar sozinho. Rode: {dependencias.comando_manual()}\n{log}", file=sys.stderr)
+            return 1
     from .pipeline import executar
     try:
         r = executar(opcoes_de_args(a), progresso=lambda m: print(m, file=sys.stderr))
