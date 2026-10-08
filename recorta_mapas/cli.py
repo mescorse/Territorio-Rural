@@ -122,6 +122,13 @@ def _listar_valores(a) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    for fluxo in (sys.stdout, sys.stderr):
+        # Console do Windows redirecionado usa cp1252: não travar em caracteres especiais.
+        if fluxo is not None and hasattr(fluxo, "reconfigure"):
+            try:
+                fluxo.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
     if not argv:
         from .gui.app import main as gui_main
         gui_main()

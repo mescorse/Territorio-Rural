@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import queue
+import subprocess
+import sys
 import threading
 import traceback
 import tkinter as tk
@@ -165,12 +167,17 @@ class App(tk.Tk):
         rod.columnconfigure(1, weight=1)
         self.v_saida = tk.StringVar()
         self._campo_arquivo(rod, 0, "Pasta de saída:", self.v_saida, None, pasta=True)
-        self.bt = ttk.Button(rod, text="Processar", command=self._processar)
-        self.bt.grid(row=1, column=2, pady=(6, 0), sticky="e")
+        botoes = ttk.Frame(rod)
+        botoes.grid(row=1, column=0, columnspan=3, pady=(6, 0), sticky="e")
+        self.bt_abrir = ttk.Button(botoes, text="Abrir pasta de saída", command=self._abrir_saida)
+        self.bt_abrir.pack(side="left", padx=(0, 6))
+        self.bt_abrir.state(["disabled"])
+        self.bt = ttk.Button(botoes, text="Processar", command=self._processar)
+        self.bt.pack(side="left")
         self.v_status = tk.StringVar(value="Escolha os arquivos e clique em Processar.")
-        ttk.Label(rod, textvariable=self.v_status).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(rod, textvariable=self.v_status).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.prog = ttk.Progressbar(rod, mode="indeterminate")
-        self.prog.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        self.prog.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     # ------------------------------------------------------------ listas
     def _add_linhas(self):
@@ -277,6 +284,7 @@ class App(tk.Tk):
                     self.v_status.set(valor)
                 elif tipo == "fim":
                     self._terminar()
+                    self.bt_abrir.state(["!disabled"])
                     self.txt.insert("1.0", valor.relatorio)
                     self.nb.select(2)
                     n_arq = sum(len(m.arquivos) for m in valor.plano.mapas)
@@ -293,10 +301,25 @@ class App(tk.Tk):
             pass
         self.after(100, self._ler_fila)
 
+    def _abrir_saida(self):
+        pasta = self.v_saida.get()
+        if not os.path.isdir(pasta):
+            return
+        if sys.platform.startswith("win"):
+            os.startfile(pasta)  # noqa: S606
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", pasta])
+
     def _terminar(self):
         self.prog.stop()
         self.bt.state(["!disabled"])
 
 
 def main():
+    if sys.platform.startswith("win"):
+        try:  # texto nítido em telas com escala (125%, 150%...)
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     App().mainloop()

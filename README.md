@@ -28,7 +28,15 @@ para o **Google My Maps**, a partir dos dados do Censo 2022 do IBGE.
 - territórios inteiros por arquivo quando cabem; território grande demais é dividido em partes;
 - saída em pastas `Mapa_01/`, `Mapa_02/`… — cada arquivo é uma camada a importar naquele mapa.
 
-## Instalação
+## Baixar o programa (Windows)
+
+Na página **Releases** do repositório, baixe `RecortaMapas-windows.zip`, extraia e dê dois cliques em
+`RecortaMapas.exe`. O pacote traz um `LEIA-ME.txt` e uma pasta `exemplo\` com dados fictícios.
+Cada envio para `main` gera uma versão nova automaticamente (`.github/workflows/windows.yml`).
+
+Dados de exemplo também podem ser gerados com `python ferramentas/gerar_exemplo.py exemplo`.
+
+## Instalação (a partir do código)
 
 Requer Python 3.11 ou mais novo.
 
@@ -75,7 +83,10 @@ pytest
 
 ## Executável para Windows (PyInstaller)
 
+Feito automaticamente pelo GitHub Actions. Para gerar manualmente:
+
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name RecortaMapas --collect-data pyproj recorta_mapas_app.py
+pyinstaller --onefile --windowed --name RecortaMapas --collect-data pyproj recorta_mapas_gui.py
+pyinstaller --onefile --console --name recorta-mapas-cli --collect-data pyproj recorta_mapas_app.py
 ```

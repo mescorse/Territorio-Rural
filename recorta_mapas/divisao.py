@@ -9,7 +9,7 @@ import numpy as np
 import shapely
 
 from .io_kml.escritor import CABECALHO, RODAPE, tamanho_placemark, xml_estilos
-from .modelos import Feicao
+from .modelos import Feicao, chave_natural
 
 INF = float("inf")
 
@@ -153,6 +153,10 @@ def empacotar(grupos: list[Grupo], cap: Peso, cat: Categoria) -> list[list[Grupo
         partes = dividir_espacial(g.feicoes, [cat.pesos[id(f)] for f in g.feicoes], cap)
         for p in partes:
             itens.append(Grupo(g.territorio, p, cat.peso(p), completo=False))
+    # Em ordem natural (T01, T02...) dá nomes de arquivo com faixas contínuas;
+    # só vale se não gastar mais arquivos que o first-fit decreasing.
+    em_ordem = sorted(itens, key=lambda g: chave_natural(g.territorio))
+    sequencia = _proximo_que_cabe(em_ordem, cap)
     itens.sort(key=lambda g: -g.peso.fracao(cap))
     arquivos: list[list[Grupo]] = []
     ocupacao: list[Peso] = []
@@ -166,4 +170,17 @@ def empacotar(grupos: list[Grupo], cap: Peso, cat: Categoria) -> list[list[Grupo
         else:
             arquivos.append([g])
             ocupacao.append(g.peso)
+    return sequencia if len(sequencia) <= len(arquivos) else arquivos
+
+
+def _proximo_que_cabe(itens: list[Grupo], cap: Peso) -> list[list[Grupo]]:
+    arquivos: list[list[Grupo]] = []
+    atual = Peso()
+    for g in itens:
+        if arquivos and (atual + g.peso).cabe(cap):
+            arquivos[-1].append(g)
+            atual = atual + g.peso
+        else:
+            arquivos.append([g])
+            atual = g.peso
     return arquivos

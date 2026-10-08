@@ -1,0 +1,78 @@
+name: Executável Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] pyinstaller
+
+      - name: Testes
+        run: pytest -q
+
+      - name: Gerar executáveis
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name RecortaMapas --collect-data pyproj recorta_mapas_gui.py
+          pyinstaller --noconfirm --onefile --console --name recorta-mapas-cli --collect-data pyproj recorta_mapas_app.py
+
+      - name: Dados de exemplo
+        run: python ferramentas/gerar_exemplo.py exemplo
+
+      - name: Teste do executável de linha de comando
+        shell: pwsh
+        run: |
+          .\dist\recorta-mapas-cli.exe --mestre exemplo\mapa_mestre.kml --territorios exemplo\territorios_rurais.kml `
+            --linhas exemplo\trajetos.kml --pontos exemplo\cnefe_exemplo.csv --saida teste_saida --formato kmz
+          if ($LASTEXITCODE -ne 0) { throw "CLI falhou ($LASTEXITCODE)" }
+          if (-not (Test-Path teste_saida\relatorio.txt)) { throw "relatorio.txt não foi gerado" }
+          if (-not (Test-Path teste_saida\Mapa_01\Territorios_rurais.kmz)) { throw "Mapa_01 incompleto" }
+          Get-ChildItem -Recurse teste_saida | Select-Object FullName, Length
+
+      - name: Teste do executável com janela (abre e continua aberto)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\dist\RecortaMapas.exe -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) { throw "RecortaMapas.exe fechou sozinho (código $($p.ExitCode))" }
+          Stop-Process -Id $p.Id -Force
+          Get-Process RecortaMapas -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Montar pacote
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pacote\RecortaMapas | Out-Null
+          Copy-Item dist\RecortaMapas.exe, dist\recorta-mapas-cli.exe, ferramentas\LEIA-ME.txt pacote\RecortaMapas\
+          Copy-Item -Recurse exemplo pacote\RecortaMapas\exemplo
+          Compress-Archive -Path pacote\RecortaMapas -DestinationPath RecortaMapas-windows.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RecortaMapas-windows
+          path: pacote/RecortaMapas
+
+      - name: Publicar versão (Releases)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: Recorta Mapas 0.1.${{ github.run_number }} (Windows)
+          body: |
+            Baixe **RecortaMapas-windows.zip**, extraia e dê dois cliques em `RecortaMapas.exe`.
+            Leia o `LEIA-ME.txt` (inclui dados de exemplo para testar).
+          files: RecortaMapas-windows.zip
