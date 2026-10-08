@@ -61,7 +61,8 @@ def test_pipeline_kmz_de_pontos_mantem_icone(dados, tmp_path):
     with zipfile.ZipFile(saida / "Mapa_01" / "Casas_rurais_T01.kmz") as z:
         assert z.read("files/casa.png") == ICONE
     assert (saida / "Territorios_rurais.kmz").exists()
-    assert (saida / "Mapa_01" / "Territorios_rurais.kmz").exists()
+    # os contornos não entram nos mapas (o usuário já tem essa camada)
+    assert not (saida / "Mapa_01" / "Territorios_rurais.kmz").exists()
     texto = (saida / "relatorio.txt").read_text(encoding="utf-8")
     assert "ETAPA 1" in texto and "T03" in texto and "ALERTA" in texto
 

@@ -62,9 +62,9 @@ def criar_parser() -> argparse.ArgumentParser:
     e.add_argument("--agrupamento", choices=[AGRUPAR_TERRITORIO, AGRUPAR_SEQUENCIAL],
                    default=AGRUPAR_TERRITORIO,
                    help="territórios inteiros por arquivo, ou blocos sequenciais (padrão: territorio)")
-    e.add_argument("--camada-territorios", default=CAMADA_TERR_RESERVAR,
+    e.add_argument("--camada-territorios", default=CAMADA_TERR_NAO,
                    choices=[CAMADA_TERR_RESERVAR, CAMADA_TERR_SE_COUBER, CAMADA_TERR_NAO],
-                   help="incluir os contornos dos territórios em cada mapa (padrão: reservar)")
+                   help="incluir os contornos dos territórios em cada mapa (padrão: nao)")
 
     s = p.add_argument_group("saída")
     s.add_argument("--saida", required=True, help="pasta de saída")

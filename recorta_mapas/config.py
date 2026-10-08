@@ -72,9 +72,9 @@ class EntradaLinhas:
 
 @dataclass
 class Opcoes:
-    mapa_mestre: str
-    territorios: str
-    saida: str
+    mapa_mestre: str = ""
+    territorios: str = ""
+    saida: str = ""
     linhas: list[EntradaLinhas] = field(default_factory=list)
     pontos: list[EntradaPontos] = field(default_factory=list)
     campo_id: str | None = None             # campo do ExtendedData se o nome estiver vazio
@@ -84,5 +84,5 @@ class Opcoes:
     simplificar_m: float = 0.0              # 0 = não simplificar
     formato: str = "kml"                    # "kml" ou "kmz"
     agrupamento: str = AGRUPAR_TERRITORIO
-    camada_territorios: str = CAMADA_TERR_RESERVAR
+    camada_territorios: str = CAMADA_TERR_NAO
     limites: Limites = field(default_factory=Limites)

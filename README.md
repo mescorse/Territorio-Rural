@@ -26,7 +26,9 @@ para o **Google My Maps**, a partir dos dados do Censo 2022 do IBGE.
 - por mapa: até 10 camadas, 9.500 feições, 45.000 vértices e 18.000 células da tabela
   (feições × colunas; nas casas é este limite que costuma pesar — menos colunas = mais casas por mapa);
 - territórios inteiros por arquivo quando cabem; território grande demais é dividido em partes;
-- saída em pastas `Mapa_01/`, `Mapa_02/`… — cada arquivo é uma camada a importar naquele mapa.
+- saída em pastas `Mapa_01/`, `Mapa_02/`… — cada arquivo é uma camada a importar naquele mapa;
+- os mapas levam só casas e trajetos (os contornos dos territórios ficam numa camada que você já tem;
+  a versão ajustada `Territorios_rurais.kml` fica na pasta principal, se precisar).
 
 ## Baixar o programa (Windows)
 
@@ -52,6 +54,11 @@ Janela (sem argumentos):
 python -m recorta_mapas
 ```
 
+A janela é escura, com páginas na lateral: **Arquivos** (mapas e dados do IBGE), **Casas** (filtro
+do CNEFE com o significado provável de cada código, colunas e nome de cada casa), **Opções**,
+**Avançado** (limites) e **Resultado**. O botão **Processar** fica sempre no rodapé, e o programa
+lembra os arquivos e escolhas para a próxima vez (em `%APPDATA%\RecortaMapas`).
+
 Linha de comando:
 
 ```
@@ -71,7 +78,7 @@ Principais opções: `--modo-linhas cortar|inteira`, `--simplificar METROS`, `--
 `--camada-territorios reservar|se_couber|nao`, `--formato kml|kmz` e os limites (`--max-...`).
 Veja todas com `python -m recorta_mapas --help`.
 
-Na pasta de saída ficam `relatorio.txt`, `Territorios_rurais.kml` e as pastas `Mapa_XX`.
+Na pasta de saída ficam `relatorio.txt`, `Territorios_rurais.kml` (contornos ajustados) e as pastas `Mapa_XX`.
 Ao rodar de novo na mesma pasta, as pastas `Mapa_XX` antigas são apagadas.
 
 ## Testes

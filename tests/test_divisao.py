@@ -79,7 +79,7 @@ def test_territorios_pequenos_agrupados_em_um_arquivo(tmp_path):
                         pontos=[EntradaPontos(csv)]))
     assert len(r.plano.mapas) == 1
     nomes = sorted(a.nome for a in r.plano.mapas[0].arquivos)
-    assert nomes == ["Casas_rurais_T01-T06", "Territorios_rurais", "Trajetos_T01-T06"]
+    assert nomes == ["Casas_rurais_T01-T06", "Trajetos_T01-T06"]
 
 
 def test_tamanho_em_bytes_forca_nova_divisao(tmp_path):

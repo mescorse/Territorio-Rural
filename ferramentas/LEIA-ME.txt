@@ -12,14 +12,18 @@ não é assinado. Clique em "Mais informações" e depois em "Executar assim mes
 O programa leva alguns segundos para abrir (ele se descompacta ao iniciar).
 
 EXPERIMENTAR COM O EXEMPLO
-1. Abra o RecortaMapas.exe.
-2. Mapa-mestre: exemplo\mapa_mestre.kml
-3. Mapa de territórios rurais: exemplo\territorios_rurais.kml
-4. Camadas de linhas > Adicionar: exemplo\trajetos.kml
-5. Pontos > Adicionar: exemplo\cnefe_exemplo.csv (confira o filtro e clique OK)
-6. Pasta de saída: crie uma pasta, por exemplo exemplo\saida
-7. Clique em Processar. O relatório aparece na aba "Relatório".
-   No exemplo, o território T08 sai de propósito do mapa-mestre e recebe ALERTA.
+1. Abra o RecortaMapas.exe. Na página "Arquivos", clique em "Escolher…":
+   - Mapa-mestre: exemplo\mapa_mestre.kml
+   - Territórios rurais: exemplo\territorios_rurais.kml
+   - "+ Adicionar trajetos": exemplo\trajetos.kml
+   - "+ Adicionar casas": exemplo\cnefe_exemplo.csv
+   - Pasta de saída: crie uma pasta, por exemplo exemplo\saida
+2. Ao adicionar o CSV, abre a página "Casas": deixe marcado só o
+   "1 Domicílio particular" (já vem assim).
+3. Clique em "Processar" (canto de baixo, à direita). O resultado aparece
+   na página "Resultado". No exemplo, o território T08 sai de propósito do
+   mapa-mestre e recebe um aviso.
+O programa lembra tudo: na próxima vez é só abrir e clicar em Processar.
 
 COM OS SEUS DADOS
 - Mapa-mestre e territórios rurais: exporte do My Maps como KML/KMZ.
@@ -30,4 +34,6 @@ COM OS SEUS DADOS
 IMPORTAR NO GOOGLE MY MAPS
 Para cada pasta Mapa_01, Mapa_02...: crie um mapa novo no My Maps e, em cada
 camada, use "Importar" com um arquivo da pasta (um arquivo = uma camada).
+Os mapas trazem só casas e trajetos. Os contornos dos territórios você já tem
+na sua camada própria (a versão ajustada fica em Territorios_rurais.kml).
 A pasta de saída também tem o relatorio.txt com o resumo de tudo.

@@ -1,278 +1,837 @@
-"""Janela principal (tkinter)."""
+"""Janela principal no modelo do Dicta: barra lateral escura com páginas, painel arredondado,
+chips e chaves, mensagens dentro da janela (nada de caixas de diálogo claras do sistema).
+
+Desempenho antes de tudo: as páginas são montadas uma vez; trocar de página é só tkraise();
+leitura de CSV e processamento rodam em segundo plano e falam com o Tk por uma fila."""
 
 from __future__ import annotations
 
+import copy
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, ttk
 
+from .. import preferencias
+from ..atributos import montar_nome, resolver_padroes
 from ..config import (
-    AGRUPAR_SEQUENCIAL, AGRUPAR_TERRITORIO, CAMADA_TERR_NAO, CAMADA_TERR_RESERVAR,
-    CAMADA_TERR_SE_COUBER, MODO_CORTAR, MODO_INTEIRA, EntradaLinhas, EntradaPontos, Limites,
-    OpcoesCSV, Opcoes,
+    AGRUPAR_SEQUENCIAL, AGRUPAR_TERRITORIO, CNEFE_COLUNA_ESPECIE, MODO_CORTAR, MODO_INTEIRA,
+    EntradaLinhas, EntradaPontos, Limites, OpcoesCSV, Opcoes,
+)
+from ..formatos import num
+from .tema import FONT, IS_WINDOWS, THEME, aplicar_tema, caixa_texto, dark_title_bar
+
+TIPOS_KML = [("KML ou KMZ", "*.kml *.kmz"), ("Todos os arquivos", "*.*")]
+TIPOS_PONTOS = [("CSV do CNEFE, KML ou KMZ", "*.csv *.txt *.kml *.kmz"), ("Todos os arquivos", "*.*")]
+
+# Significado provável dos códigos de espécie do CNEFE 2022 (confira no dicionário do IBGE).
+ESPECIES_CNEFE = {
+    "1": "Domicílio particular", "2": "Domicílio coletivo", "3": "Estab. agropecuário",
+    "4": "Estab. de ensino", "5": "Estab. de saúde", "6": "Outras finalidades",
+    "7": "Em construção", "8": "Estab. religioso",
+}
+LIMITES = (
+    ("max_feicoes_arquivo", "Feições por arquivo", 1),
+    ("max_bytes_arquivo", "MB por arquivo", 1e6),
+    ("max_camadas_mapa", "Camadas por mapa", 1),
+    ("max_feicoes_mapa", "Feições por mapa", 1),
+    ("max_vertices_mapa", "Vértices por mapa", 1),
+    ("max_celulas_mapa", "Células por mapa", 1),
 )
 
-TIPOS_KML = [("KML/KMZ", "*.kml *.kmz"), ("Todos os arquivos", "*.*")]
-TIPOS_PONTOS = [("CSV, KML ou KMZ", "*.csv *.txt *.kml *.kmz"), ("Todos os arquivos", "*.*")]
 
-
-def _eh_csv(caminho: str) -> bool:
+def eh_csv(caminho: str) -> bool:
     return os.path.splitext(caminho)[1].lower() in (".csv", ".txt", ".tsv")
 
 
+def encurtar(caminho: str, n: int = 64) -> str:
+    if len(caminho) <= n:
+        return caminho
+    nome = os.path.basename(caminho)
+    if len(nome) >= n - 4:
+        return "…" + nome[-(n - 1):]
+    return caminho[: n - len(nome) - 2] + "…" + os.sep + nome
+
+
+def abrir_no_sistema(caminho: str) -> None:
+    if IS_WINDOWS:
+        os.startfile(caminho)  # noqa: S606
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", caminho])
+
+
 class App(tk.Tk):
+    PAGINAS = ("Arquivos", "Casas", "Opções", "Avançado", "Resultado")
+
     def __init__(self):
+        inicio = time.perf_counter()
         super().__init__()
-        self.title("Recorta Mapas - territórios rurais para o Google My Maps")
-        self.geometry("880x660")
-        self.minsize(760, 560)
+        self.withdraw()
+        self.title("Recorta Mapas")
+        aplicar_tema(self)
+        self.configure(bg=THEME["side"])
+        self.geometry("1020x640")
+        self.minsize(940, 580)
+        self.protocol("WM_DELETE_WINDOW", self.fechar)
+
+        self.op: Opcoes = preferencias.carregar()
         self.fila: queue.Queue = queue.Queue()
-        self.pontos: list[EntradaPontos] = []
-        self.linhas: list[str] = []
-        self._montar()
+        self.infos: dict[str, object] = {}        # caminho do CSV -> InfoCSV
+        self.valores: dict[tuple, object] = {}    # (caminho, coluna) -> Counter
+        self.lendo: set = set()
+        self.casa_atual = 0
+        self.processando = False
+        self.ultimo_resultado = None
+        self._confirmar_padroes = False
+
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+        self._barra_lateral()
+        self._painel()
+        for p in self.op.pontos:
+            if eh_csv(p.caminho):
+                self.lendo.add(p.caminho)
+        self.atualizar_tudo()
+        self.mostrar("Arquivos")
+        self.deiconify()
+        dark_title_bar(self)
         self.after(100, self._ler_fila)
+        # Ler os CSV só depois que a janela aparece, para não atrasar a abertura.
+        self.after(30, lambda: [self._inspecionar(p) for p in self.op.pontos if eh_csv(p.caminho)])
+        self.tempo_abertura_ms = (time.perf_counter() - inicio) * 1000
 
-    # ------------------------------------------------------------ montagem
-    def _campo_arquivo(self, pai, linha, rotulo, var, tipos, pasta=False):
-        ttk.Label(pai, text=rotulo).grid(row=linha, column=0, sticky="w", pady=3)
-        ttk.Entry(pai, textvariable=var).grid(row=linha, column=1, sticky="ew", padx=4)
+    # ================================================================ estrutura
+    def _barra_lateral(self):
+        lado = ttk.Frame(self, style="Side.TFrame", padding=(10, 18, 10, 18))
+        lado.grid(row=0, column=0, sticky="ns")
+        ttk.Label(lado, text="Recorta Mapas", style="Brand.TLabel").pack(anchor="w", padx=12)
+        ttk.Label(lado, text="Territórios rurais → My Maps", style="SideMuted.TLabel").pack(
+            anchor="w", padx=12, pady=(0, 16))
+        self.nav = {}
+        for nome in self.PAGINAS:
+            b = ttk.Button(lado, text=nome, style="Nav.TButton", width=14,
+                           command=lambda n=nome: self.mostrar(n))
+            b.pack(fill="x", pady=1)
+            self.nav[nome] = b
 
-        def escolher():
-            if pasta:
-                c = filedialog.askdirectory(parent=self)
-            else:
-                c = filedialog.askopenfilename(parent=self, filetypes=tipos)
-            if c:
-                var.set(c)
+    def _painel(self):
+        fora = ttk.Frame(self, style="Side.TFrame", padding=(0, 12, 12, 12))
+        fora.grid(row=0, column=1, sticky="nsew")
+        fora.columnconfigure(0, weight=1)
+        fora.rowconfigure(0, weight=1)
+        painel = ttk.Frame(fora, style="Panel.TFrame", padding=(8, 8, 8, 4))
+        painel.grid(row=0, column=0, sticky="nsew")
+        painel.columnconfigure(0, weight=1)
+        painel.rowconfigure(0, weight=1)
+        corpo = ttk.Frame(painel, style="Card.TFrame")
+        corpo.grid(row=0, column=0, sticky="nsew")
+        corpo.columnconfigure(0, weight=1)
+        corpo.rowconfigure(0, weight=1)
+        self.paginas = {}
+        for nome in self.PAGINAS:
+            card = ttk.Frame(corpo, style="Card.TFrame", padding=(18, 14, 18, 8))
+            card.grid(row=0, column=0, sticky="nsew")
+            card.columnconfigure(0, weight=1)
+            self.paginas[nome] = card
+        self._pagina_arquivos(self.paginas["Arquivos"])
+        self._pagina_casas(self.paginas["Casas"])
+        self._pagina_opcoes(self.paginas["Opções"])
+        self._pagina_avancado(self.paginas["Avançado"])
+        self._pagina_resultado(self.paginas["Resultado"])
 
-        ttk.Button(pai, text="Escolher...", command=escolher).grid(row=linha, column=2)
+        rodape = ttk.Frame(painel, style="Card.TFrame", padding=(18, 8, 10, 10))
+        rodape.grid(row=1, column=0, sticky="ew")
+        rodape.columnconfigure(0, weight=1)
+        self.msg = ttk.Label(rodape, style="Msg.TLabel", wraplength=520, justify="left")
+        self.msg.grid(row=0, column=0, sticky="w")
+        self.bt_abrir = ttk.Button(rodape, text="Abrir pasta de saída", style="Ghost.TButton",
+                                   command=self.abrir_saida)
+        self.bt_abrir.grid(row=0, column=1, padx=(8, 8))
+        self.bt_processar = ttk.Button(rodape, text="Processar", style="Accent.TButton",
+                                       command=self.processar)
+        self.bt_processar.grid(row=0, column=2)
 
-    def _montar(self):
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
-        self.nb = nb
+    def mostrar(self, nome: str) -> None:
+        if nome == "Casas" and getattr(self, "_casas_sujo", False):
+            self.render_casas()
+        self.paginas[nome].tkraise()
+        for pagina, b in self.nav.items():
+            b.configure(style="NavOn.TButton" if pagina == nome else "Nav.TButton")
+        self.pagina_atual = nome
 
-        # ---- Entradas
-        ent = ttk.Frame(nb, padding=8)
-        nb.add(ent, text="Entradas")
-        ent.columnconfigure(1, weight=1)
-        self.v_mestre = tk.StringVar()
-        self.v_terr = tk.StringVar()
-        self.v_campo_id = tk.StringVar()
-        self._campo_arquivo(ent, 0, "Mapa-mestre (limite da congregação):", self.v_mestre, TIPOS_KML)
-        self._campo_arquivo(ent, 1, "Mapa de territórios rurais:", self.v_terr, TIPOS_KML)
-        ttk.Label(ent, text="Campo de ID se o nome estiver vazio (opcional):").grid(row=2, column=0, sticky="w")
-        ttk.Entry(ent, textvariable=self.v_campo_id, width=20).grid(row=2, column=1, sticky="w", padx=4)
+    @staticmethod
+    def titulo(card, texto: str, sub: str, linha: int = 0) -> None:
+        ttk.Label(card, text=texto, style="Head.Card.TLabel").grid(row=linha, column=0, sticky="w")
+        ttk.Label(card, text=sub, style="Muted.Card.TLabel", wraplength=620, justify="left").grid(
+            row=linha + 1, column=0, sticky="w", pady=(2, 14))
 
-        lf = ttk.LabelFrame(ent, text="Camadas de linhas (ex.: Trajetos dos recenseadores)", padding=6)
-        lf.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=6)
-        ent.rowconfigure(3, weight=1)
-        lf.columnconfigure(0, weight=1)
-        lf.rowconfigure(0, weight=1)
-        self.lb_linhas = tk.Listbox(lf, height=4)
-        self.lb_linhas.grid(row=0, column=0, rowspan=3, sticky="nsew")
-        ttk.Button(lf, text="Adicionar...", command=self._add_linhas).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(lf, text="Remover", command=self._rem_linhas).grid(row=1, column=1, padx=4, sticky="ew")
-        self.v_pref_linhas = tk.StringVar(value="Trajetos")
-        ttk.Label(lf, text="Nome base dos arquivos:").grid(row=3, column=0, sticky="w")
-        ttk.Entry(lf, textvariable=self.v_pref_linhas, width=24).grid(row=4, column=0, sticky="w")
+    def dizer(self, texto: str, tipo: str = "text") -> None:
+        self.msg.configure(text=texto, foreground=THEME.get(tipo, THEME["text"]))
 
-        pf = ttk.LabelFrame(ent, text="Pontos (ex.: CSV do CNEFE 2022 ou KML/KMZ de casas)", padding=6)
-        pf.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=6)
-        ent.rowconfigure(4, weight=1)
-        pf.columnconfigure(0, weight=1)
-        pf.rowconfigure(0, weight=1)
-        self.lb_pontos = tk.Listbox(pf, height=4)
-        self.lb_pontos.grid(row=0, column=0, rowspan=3, sticky="nsew")
-        self.lb_pontos.bind("<Double-Button-1>", lambda e: self._config_csv())
-        ttk.Button(pf, text="Adicionar...", command=self._add_pontos).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(pf, text="Configurar CSV...", command=self._config_csv).grid(row=1, column=1, padx=4, sticky="ew")
-        ttk.Button(pf, text="Remover", command=self._rem_pontos).grid(row=2, column=1, padx=4, sticky="ew")
-        self.v_pref_pontos = tk.StringVar(value="Casas_rurais")
-        ttk.Label(pf, text="Nome base dos arquivos:").grid(row=3, column=0, sticky="w")
-        ttk.Entry(pf, textvariable=self.v_pref_pontos, width=24).grid(row=4, column=0, sticky="w")
+    # ================================================================ Arquivos
+    def _pagina_arquivos(self, card):
+        self.titulo(card, "Arquivos", "Escolha os mapas e os dados do IBGE. "
+                    "O programa lembra tudo para a próxima vez.")
+        g = self.grade_arquivos = ttk.Frame(card, style="Card.TFrame")
+        g.grid(row=2, column=0, sticky="ew")
+        g.columnconfigure(1, weight=1)
 
-        # ---- Opções
-        opc = ttk.Frame(nb, padding=8)
-        nb.add(opc, text="Opções")
-        opc.columnconfigure(0, weight=1)
-        opc.columnconfigure(1, weight=1)
+    def _linha_arquivo(self, g, r, rotulo, valor, escolher, remover=None, extra=None):
+        ttk.Label(g, text=rotulo, style="Field.Card.TLabel").grid(
+            row=r, column=0, sticky="w", padx=(0, 16), pady=4)
+        ttk.Label(g, text=encurtar(valor) if valor else "Nenhum arquivo escolhido",
+                  style="Path.Card.TLabel" if valor else "Empty.Card.TLabel").grid(
+            row=r, column=1, sticky="w")
+        if extra:
+            texto, cmd = extra
+            ttk.Button(g, text=texto, command=cmd).grid(row=r, column=2, padx=(8, 0), sticky="ew")
+        if escolher:
+            ttk.Button(g, text="Escolher…", command=escolher).grid(row=r, column=2, padx=(8, 0), sticky="ew")
+        if remover:
+            ttk.Button(g, text="\u2715", width=2, style="Ghost.TButton", command=remover).grid(
+                row=r, column=3, padx=(4, 0))
 
-        e1 = ttk.LabelFrame(opc, text="Etapa 1 - ajuste ao mapa-mestre", padding=6)
-        e1.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=4)
-        self.v_limiar = tk.StringVar(value="2")
-        ttk.Label(e1, text="Alertar se o território perder mais de (%):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(e1, textvariable=self.v_limiar, width=8).grid(row=0, column=1, padx=4)
+    def render_arquivos(self):
+        g = self.grade_arquivos
+        for w in g.winfo_children():
+            w.destroy()
+        op = self.op
+        r = 0
+        self._linha_arquivo(g, r, "Mapa-mestre", op.mapa_mestre,
+                            lambda: self._escolher("mapa_mestre", "Mapa-mestre"))
+        r += 1
+        self._linha_arquivo(g, r, "Territórios rurais", op.territorios,
+                            lambda: self._escolher("territorios", "Territórios rurais"))
+        r += 1
+        ttk.Separator(g).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8)
+        r += 1
+        for i, e in enumerate(op.linhas):
+            self._linha_arquivo(g, r, "Trajetos" if i == 0 else "", e.caminho, None,
+                                remover=lambda i=i: self._remover("linhas", i))
+            r += 1
+        ttk.Button(g, text="+  Adicionar trajetos", style="Ghost.TButton",
+                   command=self._add_linhas).grid(row=r, column=1, sticky="w", pady=(0, 6))
+        r += 1
+        for i, e in enumerate(op.pontos):
+            extra = ("Configurar", lambda i=i: self._configurar_casa(i)) if eh_csv(e.caminho) else None
+            self._linha_arquivo(g, r, "Casas" if i == 0 else "", e.caminho, None,
+                                remover=lambda i=i: self._remover("pontos", i), extra=extra)
+            r += 1
+        ttk.Button(g, text="+  Adicionar casas (CSV do CNEFE ou KML)", style="Ghost.TButton",
+                   command=self._add_pontos).grid(row=r, column=1, sticky="w", pady=(0, 6))
+        r += 1
+        ttk.Separator(g).grid(row=r, column=0, columnspan=5, sticky="ew", pady=8)
+        r += 1
+        self._linha_arquivo(g, r, "Pasta de saída", op.saida, self._escolher_saida)
 
-        e2 = ttk.LabelFrame(opc, text="Etapa 2 - linhas", padding=6)
-        e2.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=4)
-        self.v_modo = tk.StringVar(value=MODO_CORTAR)
-        ttk.Radiobutton(e2, text="Cortar na borda", value=MODO_CORTAR, variable=self.v_modo).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(e2, text="Manter feição inteira se tocar", value=MODO_INTEIRA,
-                        variable=self.v_modo).grid(row=1, column=0, sticky="w")
-        self.v_simpl = tk.StringVar(value="0")
-        ttk.Label(e2, text="Simplificar trajetos (metros, 0 = não):").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(e2, textvariable=self.v_simpl, width=8).grid(row=2, column=1, padx=4, pady=(6, 0))
+    def _pasta_inicial(self) -> str | None:
+        for c in (self.op.territorios, self.op.mapa_mestre, self.op.saida):
+            if c and os.path.exists(os.path.dirname(c) or c):
+                return os.path.dirname(c) if os.path.isfile(c) else c
+        return None
 
-        dv = ttk.LabelFrame(opc, text="Divisão em arquivos e mapas", padding=6)
-        dv.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=4)
-        self.v_agr = tk.StringVar(value=AGRUPAR_TERRITORIO)
-        ttk.Radiobutton(dv, text="Territórios inteiros por arquivo (quando couberem)",
-                        value=AGRUPAR_TERRITORIO, variable=self.v_agr).pack(anchor="w")
-        ttk.Radiobutton(dv, text="Blocos sequenciais (enche cada arquivo ao máximo)",
-                        value=AGRUPAR_SEQUENCIAL, variable=self.v_agr).pack(anchor="w")
-        ttk.Label(dv, text="Contornos dos territórios em cada mapa:").pack(anchor="w", pady=(8, 0))
-        self.v_cam_terr = tk.StringVar(value=CAMADA_TERR_RESERVAR)
-        for txt, val in (("Sempre (reservar espaço em cada mapa)", CAMADA_TERR_RESERVAR),
-                         ("Só onde sobrar espaço", CAMADA_TERR_SE_COUBER),
-                         ("Não incluir (só na pasta principal)", CAMADA_TERR_NAO)):
-            ttk.Radiobutton(dv, text=txt, value=val, variable=self.v_cam_terr).pack(anchor="w")
-        ttk.Label(dv, text="Formato de saída:").pack(anchor="w", pady=(8, 0))
-        self.v_formato = tk.StringVar(value="kml")
-        fr = ttk.Frame(dv)
-        fr.pack(anchor="w")
-        ttk.Radiobutton(fr, text="KML", value="kml", variable=self.v_formato).pack(side="left")
-        ttk.Radiobutton(fr, text="KMZ", value="kmz", variable=self.v_formato).pack(side="left", padx=8)
+    def _escolher(self, campo, titulo):
+        c = filedialog.askopenfilename(parent=self, title=titulo, filetypes=TIPOS_KML,
+                                       initialdir=self._pasta_inicial())
+        if c:
+            setattr(self.op, campo, os.path.normpath(c))
+            self.atualizar_tudo()
 
-        lm = ttk.LabelFrame(opc, text="Limites do Google My Maps (com margem)", padding=6)
-        lm.grid(row=1, column=1, sticky="nsew", padx=(4, 0), pady=4)
-        lim = Limites()
-        self.v_lim = {}
-        for i, (chave, rot, val) in enumerate((
-                ("max_feicoes_arquivo", "Feições por arquivo", lim.max_feicoes_arquivo),
-                ("max_mb_arquivo", "MB por arquivo (KML sem compressão)", lim.max_bytes_arquivo / 1e6),
-                ("max_camadas_mapa", "Camadas por mapa", lim.max_camadas_mapa),
-                ("max_feicoes_mapa", "Feições por mapa", lim.max_feicoes_mapa),
-                ("max_vertices_mapa", "Vértices por mapa", lim.max_vertices_mapa),
-                ("max_celulas_mapa", "Células da tabela por mapa", lim.max_celulas_mapa))):
-            ttk.Label(lm, text=rot + ":").grid(row=i, column=0, sticky="w")
-            v = tk.StringVar(value=f"{val:g}")
-            ttk.Entry(lm, textvariable=v, width=10).grid(row=i, column=1, padx=4, pady=1)
-            self.v_lim[chave] = v
+    def _escolher_saida(self):
+        c = filedialog.askdirectory(parent=self, title="Pasta de saída", initialdir=self._pasta_inicial())
+        if c:
+            self.op.saida = os.path.normpath(c)
+            self.atualizar_tudo()
 
-        # ---- Relatório
-        rel = ttk.Frame(nb, padding=4)
-        nb.add(rel, text="Relatório")
-        self.txt = scrolledtext.ScrolledText(rel, wrap="none", font=("Consolas", 9))
-        self.txt.pack(fill="both", expand=True)
-
-        # ---- Rodapé
-        rod = ttk.Frame(self, padding=(8, 0, 8, 8))
-        rod.pack(fill="x")
-        rod.columnconfigure(1, weight=1)
-        self.v_saida = tk.StringVar()
-        self._campo_arquivo(rod, 0, "Pasta de saída:", self.v_saida, None, pasta=True)
-        botoes = ttk.Frame(rod)
-        botoes.grid(row=1, column=0, columnspan=3, pady=(6, 0), sticky="e")
-        self.bt_abrir = ttk.Button(botoes, text="Abrir pasta de saída", command=self._abrir_saida)
-        self.bt_abrir.pack(side="left", padx=(0, 6))
-        self.bt_abrir.state(["disabled"])
-        self.bt = ttk.Button(botoes, text="Processar", command=self._processar)
-        self.bt.pack(side="left")
-        self.v_status = tk.StringVar(value="Escolha os arquivos e clique em Processar.")
-        ttk.Label(rod, textvariable=self.v_status).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self.prog = ttk.Progressbar(rod, mode="indeterminate")
-        self.prog.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
-
-    # ------------------------------------------------------------ listas
     def _add_linhas(self):
-        for c in filedialog.askopenfilenames(parent=self, filetypes=TIPOS_KML):
-            self.linhas.append(c)
-            self.lb_linhas.insert("end", c)
-
-    def _rem_linhas(self):
-        for i in reversed(self.lb_linhas.curselection()):
-            self.lb_linhas.delete(i)
-            del self.linhas[i]
-
-    def _rotulo_pontos(self, e: EntradaPontos) -> str:
-        if not _eh_csv(e.caminho):
-            return e.caminho
-        filtro = f"{e.filtro_coluna} = {', '.join(e.filtro_valores)}" if e.filtro_coluna else "sem filtro"
-        return f"{e.caminho}   [{filtro}]"
+        for c in filedialog.askopenfilenames(parent=self, title="Trajetos", filetypes=TIPOS_KML,
+                                             initialdir=self._pasta_inicial()):
+            self.op.linhas.append(EntradaLinhas(os.path.normpath(c)))
+        self.atualizar_tudo()
 
     def _add_pontos(self):
-        for c in filedialog.askopenfilenames(parent=self, filetypes=TIPOS_PONTOS):
-            e = EntradaPontos(c, csv=OpcoesCSV() if _eh_csv(c) else None)
-            self.pontos.append(e)
-            self.lb_pontos.insert("end", c)
-            if _eh_csv(c):
-                self.lb_pontos.selection_clear(0, "end")
-                self.lb_pontos.selection_set("end")
-                self._config_csv()
+        novos = filedialog.askopenfilenames(parent=self, title="Casas", filetypes=TIPOS_PONTOS,
+                                            initialdir=self._pasta_inicial())
+        for c in novos:
+            c = os.path.normpath(c)
+            e = EntradaPontos(c, csv=OpcoesCSV() if eh_csv(c) else None)
+            self.op.pontos.append(e)
+            if eh_csv(c):
+                self._inspecionar(e)
+        self.atualizar_tudo()
+        if any(eh_csv(c) for c in novos):
+            self._configurar_casa(len(self.op.pontos) - 1)
 
-    def _config_csv(self):
-        sel = self.lb_pontos.curselection()
-        if not sel:
-            messagebox.showinfo("Pontos", "Selecione um CSV na lista.", parent=self)
+    def _remover(self, lista, i):
+        item = getattr(self.op, lista).pop(i)
+        self.infos.pop(getattr(item, "caminho", None), None)
+        self.casa_atual = 0
+        self.atualizar_tudo()
+
+    # ================================================================ Casas
+    def _pagina_casas(self, card):
+        self.titulo(card, "Casas", "Quais pontos do CSV viram casas, e o que aparece em cada uma.")
+        card.rowconfigure(2, weight=1)
+        self.casas = self._area_rolavel(card, 2)
+        self.v_ajuste_manual = tk.BooleanVar(value=False)
+
+    def _area_rolavel(self, card, linha):
+        """Conteúdo que pode passar da altura da janela: um Canvas com rolagem."""
+        caixa = ttk.Frame(card, style="Card.TFrame")
+        caixa.grid(row=linha, column=0, sticky="nsew")
+        caixa.columnconfigure(0, weight=1)
+        caixa.rowconfigure(0, weight=1)
+        tela = tk.Canvas(caixa, background=THEME["card"], highlightthickness=0, borderwidth=0)
+        tela.grid(row=0, column=0, sticky="nsew")
+        barra = ttk.Scrollbar(caixa, orient="vertical", command=tela.yview)
+        tela.configure(yscrollcommand=barra.set)
+        dentro = ttk.Frame(tela, style="Card.TFrame")
+        janela = tela.create_window(0, 0, window=dentro, anchor="nw")
+
+        def ajustar(_=None):
+            tela.configure(scrollregion=(0, 0, dentro.winfo_reqwidth(), dentro.winfo_reqheight()))
+            precisa = dentro.winfo_reqheight() > tela.winfo_height() > 1
+            if precisa:
+                barra.grid(row=0, column=1, sticky="ns")
+            else:
+                barra.grid_remove()
+                tela.yview_moveto(0)
+
+        dentro.bind("<Configure>", ajustar)
+        tela.bind("<Configure>", lambda ev: (tela.itemconfigure(janela, width=ev.width), ajustar()))
+
+        def rolar(ev):
+            if dentro.winfo_reqheight() > tela.winfo_height():
+                passo = -1 if (getattr(ev, "delta", 0) > 0 or getattr(ev, "num", 0) == 4) else 1
+                tela.yview_scroll(passo * 3, "units")
+
+        for alvo in (tela, dentro):
+            alvo.bind("<Enter>", lambda _: (self.bind_all("<MouseWheel>", rolar),
+                                            self.bind_all("<Button-4>", rolar),
+                                            self.bind_all("<Button-5>", rolar)))
+            alvo.bind("<Leave>", lambda _: (self.unbind_all("<MouseWheel>"),
+                                            self.unbind_all("<Button-4>"),
+                                            self.unbind_all("<Button-5>")))
+        dentro.columnconfigure(0, weight=1)
+        return dentro
+
+    def _fluxo(self, pai, textos, criar, fonte=10, folga=36, largura=None):
+        """Chips que quebram linha conforme a largura (medida pela fonte, sem esperar o Tk)."""
+        from tkinter import font as tkfont
+        if not hasattr(self, "_fontes"):
+            self._fontes = {}
+        f = self._fontes.setdefault(fonte, tkfont.Font(root=self, family=FONT, size=fonte))
+        largura = largura or max(self.casas_largura(), 400)
+        caixa = ttk.Frame(pai, style="Card.TFrame")
+        linha, usado = None, largura + 1
+        for i, texto in enumerate(textos):
+            w = f.measure(texto) + folga + 6
+            if usado + w > largura:
+                linha = ttk.Frame(caixa, style="Card.TFrame")
+                linha.pack(anchor="w", pady=2)
+                usado = 0
+            criar(linha, i).pack(side="left", padx=(0, 6))
+            usado += w
+        return caixa
+
+    def casas_largura(self) -> int:
+        w = self.casas.master.winfo_width() if hasattr(self, "casas") else 0
+        return int((w - 24) * 0.92) if w > 50 else 640
+
+    def _csvs(self) -> list[EntradaPontos]:
+        return [p for p in self.op.pontos if eh_csv(p.caminho)]
+
+    def _configurar_casa(self, i_ponto: int):
+        csvs = self._csvs()
+        alvo = self.op.pontos[i_ponto]
+        if alvo in csvs:
+            self.casa_atual = csvs.index(alvo)
+        self.render_casas()
+        self.mostrar("Casas")
+
+    def _inspecionar(self, e: EntradaPontos, opcoes: OpcoesCSV | None = None):
+        """Detecta codificação/separador/colunas em segundo plano."""
+        caminho = e.caminho
+        self.lendo.add(caminho)
+
+        def trabalho():
+            from ..io_csv import inspecionar
+            try:
+                info = inspecionar(caminho, opcoes or e.csv)
+                self.fila.put(("info", (e, info)))
+            except Exception as exc:  # noqa: BLE001 - mostrado na tela
+                self.fila.put(("info_erro", (e, str(exc))))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _ler_valores(self, e: EntradaPontos, coluna: str):
+        chave = (e.caminho, coluna)
+        if chave in self.valores or chave in self.lendo:
             return
-        i = sel[0]
-        e = self.pontos[i]
-        if not _eh_csv(e.caminho):
-            messagebox.showinfo("Pontos", "Este arquivo é KML/KMZ: não há o que configurar.", parent=self)
+        info = self.infos.get(e.caminho)
+        if info is None:
             return
-        from .dialogos import DialogoCSV
-        d = DialogoCSV(self, e)
-        self.wait_window(d)
-        self.lb_pontos.delete(i)
-        self.lb_pontos.insert(i, self._rotulo_pontos(e))
+        self.lendo.add(chave)
 
-    def _rem_pontos(self):
-        for i in reversed(self.lb_pontos.curselection()):
-            self.lb_pontos.delete(i)
-            del self.pontos[i]
+        def trabalho():
+            from ..io_csv import valores_distintos
+            try:
+                self.fila.put(("valores", (chave, valores_distintos(e.caminho, info.opcoes, coluna))))
+            except Exception as exc:  # noqa: BLE001
+                self.fila.put(("valores", (chave, exc)))
 
-    # ------------------------------------------------------------ execução
-    def _numero(self, var, nome) -> float:
-        try:
-            return float(var.get().replace(",", "."))
-        except ValueError:
-            raise ValueError(f"Valor inválido em \"{nome}\": {var.get()}")
+        threading.Thread(target=trabalho, daemon=True).start()
 
-    def _opcoes(self) -> Opcoes:
-        if not self.v_mestre.get() or not self.v_terr.get():
-            raise ValueError("Escolha o mapa-mestre e o mapa de territórios rurais.")
-        if not self.v_saida.get():
-            raise ValueError("Escolha a pasta de saída.")
-        l = {k: self._numero(v, k) for k, v in self.v_lim.items()}
-        lim = Limites(int(l["max_feicoes_arquivo"]), int(l["max_mb_arquivo"] * 1e6), int(l["max_camadas_mapa"]),
-                      int(l["max_feicoes_mapa"]), int(l["max_vertices_mapa"]), int(l["max_celulas_mapa"]))
-        pref_p = self.v_pref_pontos.get().strip() or "Casas_rurais"
-        for e in self.pontos:
-            e.prefixo = pref_p
-        return Opcoes(
-            mapa_mestre=self.v_mestre.get(), territorios=self.v_terr.get(), saida=self.v_saida.get(),
-            linhas=[EntradaLinhas(c, self.v_pref_linhas.get().strip() or "Trajetos") for c in self.linhas],
-            pontos=[EntradaPontos(**vars(e)) for e in self.pontos],
-            campo_id=self.v_campo_id.get().strip() or None,
-            limiar_perda_pct=self._numero(self.v_limiar, "limiar de perda"),
-            modo_linhas=self.v_modo.get(), simplificar_m=self._numero(self.v_simpl, "simplificar"),
-            formato=self.v_formato.get(), agrupamento=self.v_agr.get(),
-            camada_territorios=self.v_cam_terr.get(), limites=lim,
-        )
-
-    def _processar(self):
-        try:
-            op = self._opcoes()
-        except ValueError as e:
-            messagebox.showwarning("Recorta Mapas", str(e), parent=self)
+    def render_casas(self):
+        self._casas_sujo = False
+        f = self.casas
+        for w in f.winfo_children():
+            w.destroy()
+        csvs = self._csvs()
+        if not csvs:
+            ttk.Label(f, style="Empty.Card.TLabel", text="Nenhum CSV de casas. Adicione o CSV do CNEFE "
+                      "na página Arquivos. (Casas em KML/KMZ entram como estão.)").grid(row=0, column=0, sticky="w")
             return
-        self.bt.state(["disabled"])
-        self.prog.start(12)
+        self.casa_atual = min(self.casa_atual, len(csvs) - 1)
+        e = csvs[self.casa_atual]
+        r = 0
+        if len(csvs) > 1:
+            chips = ttk.Frame(f, style="Card.TFrame")
+            chips.grid(row=r, column=0, sticky="w", pady=(0, 10))
+            v = tk.IntVar(value=self.casa_atual)
+            for i, p in enumerate(csvs):
+                ttk.Radiobutton(chips, text=os.path.basename(p.caminho), value=i, variable=v,
+                                style="Chip.TRadiobutton",
+                                command=lambda v=v: (setattr(self, "casa_atual", v.get()), self.render_casas())
+                                ).grid(row=0, column=i, padx=(0, 8))
+            r += 1
+        info = self.infos.get(e.caminho)
+        if info is None:
+            texto = "Lendo o arquivo…" if e.caminho in self.lendo else getattr(e, "_erro", "Não foi possível ler.")
+            ttk.Label(f, text=texto, style="Muted.Card.TLabel" if e.caminho in self.lendo
+                      else "Danger.Card.TLabel", wraplength=620).grid(row=r, column=0, sticky="w")
+            return
+        o = info.opcoes
+        sep = {"\t": "tabulação", ";": "ponto e vírgula", ",": "vírgula"}.get(o.delimitador, o.delimitador)
+        ttk.Label(f, style="Card.TLabel", text=(
+            f"{os.path.basename(e.caminho)}:  {o.codificacao.upper()} · {sep} · "
+            f"coordenadas em {o.coluna_lat} / {o.coluna_lon}"
+            + ("  ·  formato CNEFE" if info.cnefe else "")), wraplength=640, justify="left").grid(
+            row=r, column=0, sticky="w")
+        r += 1
+        ttk.Checkbutton(f, text="Ajustar a leitura manualmente", variable=self.v_ajuste_manual,
+                        style="Switch.TCheckbutton", command=self.render_casas).grid(
+            row=r, column=0, sticky="ew", pady=(4, 0))
+        r += 1
+        if self.v_ajuste_manual.get():
+            r = self._ajuste_manual(f, r, e, info)
+
+        # --- filtro
+        ttk.Label(f, text="QUAIS PONTOS MANTER", style="Muted.Card.TLabel").grid(
+            row=r, column=0, sticky="w", pady=(16, 4))
+        r += 1
+        linha = ttk.Frame(f, style="Card.TFrame")
+        linha.grid(row=r, column=0, sticky="w")
+        v_filtrar = tk.BooleanVar(value=bool(e.filtro_coluna))
+        v_col = tk.StringVar(value=e.filtro_coluna or (CNEFE_COLUNA_ESPECIE if info.cnefe else ""))
+
+        def mudar_filtro(*_):
+            if v_filtrar.get() and v_col.get():
+                if v_col.get() != e.filtro_coluna:
+                    e.filtro_coluna, e.filtro_valores = v_col.get(), []
+            else:
+                e.filtro_coluna, e.filtro_valores = "", []
+            self.render_casas()
+            self.validar()
+
+        ttk.Checkbutton(linha, text="Filtrar pela coluna ", variable=v_filtrar,
+                        style="Switch.TCheckbutton", command=mudar_filtro).grid(row=0, column=0, padx=(0, 10))
+        cb = ttk.Combobox(linha, textvariable=v_col, values=info.colunas, state="readonly", width=24)
+        cb.grid(row=0, column=1)
+        cb.bind("<<ComboboxSelected>>", mudar_filtro)
+        r += 1
+        if e.filtro_coluna:
+            r = self._chips_valores(f, r, e)
+
+        # --- colunas
+        ttk.Label(f, text="COLUNAS EM CADA CASA (além de Territorio)", style="Muted.Card.TLabel").grid(
+            row=r, column=0, sticky="w", pady=(16, 4))
+        r += 1
+        escolhidas = set(e.colunas or [])
+        ignorar = {o.coluna_lat, o.coluna_lon}
+        visiveis = [c for c in info.colunas if c not in ignorar]
+
+        def chip_coluna(pai, i):
+            c = visiveis[i]
+            v = tk.BooleanVar(value=c in escolhidas)
+
+            def alternar():
+                atual = list(e.colunas or [])
+                if v.get() and c not in atual:
+                    atual.append(c)
+                elif not v.get() and c in atual:
+                    atual.remove(c)
+                e.colunas = [x for x in info.colunas if x in atual]
+
+            b = ttk.Checkbutton(pai, text=c, variable=v, style="Mini.TCheckbutton", command=alternar)
+            b._var = v
+            return b
+
+        self._fluxo(f, visiveis, chip_coluna, fonte=9, folga=22).grid(row=r, column=0, sticky="w")
+        r += 1
+        ttk.Label(f, style="Muted.Card.TLabel", text="Menos colunas = mais casas em cada mapa "
+                  "(o My Maps limita as células da tabela).").grid(row=r, column=0, sticky="w", pady=(4, 0))
+        r += 1
+
+        # --- nome
+        ttk.Label(f, text="NOME DE CADA CASA", style="Muted.Card.TLabel").grid(
+            row=r, column=0, sticky="w", pady=(16, 4))
+        r += 1
+        v_nome = tk.StringVar(value=e.nome_modelo or (f"{{{e.nome_coluna}}}" if e.nome_coluna else ""))
+        ttk.Entry(f, textvariable=v_nome, width=70).grid(row=r, column=0, sticky="w")
+        r += 1
+        exemplo = ttk.Label(f, style="Muted.Card.TLabel", wraplength=620, justify="left")
+        exemplo.grid(row=r, column=0, sticky="w", pady=(4, 0))
+
+        def mudar_nome(*_):
+            e.nome_modelo, e.nome_coluna = v_nome.get().strip() or "Casa {n}", None
+            amostra = info.amostra[0] if info.amostra else {}
+            exemplo.configure(text=f"Exemplo: {montar_nome(e.nome_modelo, amostra, 1) or '(vazio)'}"
+                              "      Use {COLUNA} para inserir valores e {n} para numerar.")
+
+        v_nome.trace_add("write", mudar_nome)
+        mudar_nome()
+
+    def _ajuste_manual(self, f, r, e, info):
+        o = info.opcoes
+        g = ttk.Frame(f, style="Card.TFrame")
+        g.grid(row=r, column=0, sticky="w", pady=(6, 0))
+        vs = {}
+        for i, (rot, chave, valores) in enumerate((
+                ("Codificação", "codificacao", ["utf-8", "utf-8-sig", "latin-1", "cp1252"]),
+                ("Separador", "delimitador", [";", ",", "tab", "|"]),
+                ("Latitude", "coluna_lat", info.colunas),
+                ("Longitude", "coluna_lon", info.colunas))):
+            atual = getattr(o, chave)
+            vs[chave] = tk.StringVar(value="tab" if atual == "\t" else atual)
+            ttk.Label(g, text=rot, style="Field.Card.TLabel").grid(row=0, column=2 * i, padx=(0, 6))
+            ttk.Combobox(g, textvariable=vs[chave], values=valores, width=12 if i > 1 else 9).grid(
+                row=0, column=2 * i + 1, padx=(0, 14))
+
+        def reler():
+            d = vs["delimitador"].get()
+            novas = OpcoesCSV(vs["codificacao"].get() or None, "\t" if d == "tab" else (d or None),
+                              vs["coluna_lat"].get() or None, vs["coluna_lon"].get() or None)
+            if novas.delimitador != o.delimitador:
+                novas.coluna_lat = novas.coluna_lon = None
+            e.csv = novas
+            self.infos.pop(e.caminho, None)
+            self.valores = {k: v for k, v in self.valores.items() if k[0] != e.caminho}
+            self._inspecionar(e, novas)
+            self.render_casas()
+
+        ttk.Button(g, text="Reler", command=reler).grid(row=0, column=8)
+        return r + 1
+
+    def _chips_valores(self, f, r, e):
+        chave = (e.caminho, e.filtro_coluna)
+        cont = self.valores.get(chave)
+        if cont is None:
+            self._ler_valores(e, e.filtro_coluna)
+            ttk.Label(f, text="Contando os valores…", style="Muted.Card.TLabel").grid(
+                row=r, column=0, sticky="w", pady=(6, 0))
+            return r + 1
+        if isinstance(cont, Exception):
+            ttk.Label(f, text=f"Erro ao ler os valores: {cont}", style="Danger.Card.TLabel").grid(
+                row=r, column=0, sticky="w", pady=(6, 0))
+            return r + 1
+        cnefe = e.filtro_coluna == CNEFE_COLUNA_ESPECIE
+        valores = sorted(cont, key=lambda v: (-cont[v], v))[:40]
+        marcados = set(e.filtro_valores)
+        textos = []
+        for val in valores:
+            nome = ESPECIES_CNEFE.get(val, "") if cnefe else ""
+            textos.append(f"{val or '(vazio)'}{'  ' + nome if nome else ''}  ·  {num(cont[val])}")
+
+        def chip_valor(pai, i):
+            val = valores[i]
+            v = tk.BooleanVar(value=val in marcados)
+
+            def alternar():
+                atual = set(e.filtro_valores)
+                atual.add(val) if v.get() else atual.discard(val)
+                e.filtro_valores = sorted(atual)
+                self.validar()
+
+            b = ttk.Checkbutton(pai, text=textos[i], variable=v, style="Chip.TCheckbutton", command=alternar)
+            b._var = v
+            return b
+
+        self._fluxo(f, textos, chip_valor, fonte=10, folga=44).grid(row=r, column=0, sticky="w", pady=(8, 0))
+        r += 1
+        if cnefe:
+            ttk.Label(f, style="Muted.Card.TLabel", wraplength=620, justify="left", text=(
+                "Os nomes dos códigos são os prováveis do CNEFE 2022: confira no dicionário de dados "
+                "do IBGE. Para casas, normalmente só o 1 (domicílio particular).")).grid(
+                row=r, column=0, sticky="w", pady=(4, 0))
+            r += 1
+        return r
+
+    # ================================================================ Opções
+    def _chips(self, pai, linha, variavel, escolhas, ao_mudar):
+        g = ttk.Frame(pai, style="Card.TFrame")
+        g.grid(row=linha, column=0, sticky="w", pady=(0, 4))
+        for i, (valor, texto) in enumerate(escolhas):
+            ttk.Radiobutton(g, text=texto, value=valor, variable=variavel, style="Chip.TRadiobutton",
+                            command=ao_mudar).grid(row=0, column=i, padx=(0, 8))
+
+    def _secao(self, card, linha, texto):
+        ttk.Label(card, text=texto, style="Muted.Card.TLabel").grid(row=linha, column=0, sticky="w", pady=(10, 6))
+
+    def _pagina_opcoes(self, card):
+        self.titulo(card, "Opções", "Como os trajetos são recortados e o formato dos arquivos.")
+        self.v_modo = tk.StringVar()
+        self.v_simplificar = tk.BooleanVar()
+        self.v_metros = tk.StringVar()
+        self.v_formato = tk.StringVar()
+        self._secao(card, 2, "TRAJETOS QUE SAEM DO TERRITÓRIO RURAL")
+        self._chips(card, 3, self.v_modo, ((MODO_CORTAR, "Cortar na borda"),
+                                           (MODO_INTEIRA, "Manter o trajeto inteiro")), self._ler_opcoes)
+        ttk.Label(card, style="Muted.Card.TLabel", wraplength=620, justify="left", text=(
+            "Inteiro: um trajeto que toca vários territórios vai para onde está a maior parte dele.")).grid(
+            row=4, column=0, sticky="w")
+        linha = ttk.Frame(card, style="Card.TFrame")
+        linha.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        linha.columnconfigure(0, weight=1)
+        ttk.Checkbutton(linha, text="Simplificar os trajetos (arquivos menores, cabem mais por mapa)",
+                        variable=self.v_simplificar, style="Switch.TCheckbutton",
+                        command=self._ler_opcoes).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(linha, textvariable=self.v_metros, width=6).grid(row=0, column=1, padx=(12, 6))
+        ttk.Label(linha, text="metros", style="Card.TLabel").grid(row=0, column=2)
+        self.v_metros.trace_add("write", lambda *_: self._ler_opcoes())
+        self._secao(card, 6, "FORMATO DOS ARQUIVOS")
+        self._chips(card, 7, self.v_formato, (("kml", "KML"), ("kmz", "KMZ (compactado)")), self._ler_opcoes)
+
+    def _pagina_avancado(self, card):
+        self.titulo(card, "Avançado", "Normalmente não precisa mexer. Os limites já têm margem de "
+                    "segurança em relação aos do Google My Maps.")
+        self.v_agrupar = tk.StringVar()
+        self.v_limiar = tk.StringVar()
+        self.v_campo_id = tk.StringVar()
+        self._secao(card, 2, "COMO DIVIDIR OS ARQUIVOS")
+        self._chips(card, 3, self.v_agrupar, ((AGRUPAR_TERRITORIO, "Territórios inteiros por arquivo"),
+                                              (AGRUPAR_SEQUENCIAL, "Encher cada arquivo ao máximo")),
+                    self._ler_opcoes)
+        g = ttk.Frame(card, style="Card.TFrame")
+        g.grid(row=4, column=0, sticky="w", pady=(14, 0))
+        for i, (rot, var, larg) in enumerate((
+                ("Alertar se o território perder mais de (%)", self.v_limiar, 8),
+                ("Campo de ID quando o território não tem nome", self.v_campo_id, 18))):
+            ttk.Label(g, text=rot, style="Card.TLabel").grid(row=i, column=0, sticky="w", pady=3, padx=(0, 12))
+            ttk.Entry(g, textvariable=var, width=larg).grid(row=i, column=1, sticky="w", pady=3)
+            var.trace_add("write", lambda *_: self._ler_opcoes())
+        self._secao(card, 5, "LIMITES DO GOOGLE MY MAPS (COM MARGEM)")
+        g2 = ttk.Frame(card, style="Card.TFrame")
+        g2.grid(row=6, column=0, sticky="w")
+        self.v_lim = {}
+        for i, (chave, rot, _) in enumerate(LIMITES):
+            self.v_lim[chave] = var = tk.StringVar()
+            linha, col = i // 2, (i % 2) * 2
+            ttk.Label(g2, text=rot, style="Card.TLabel").grid(row=linha, column=col, sticky="w", pady=3,
+                                                              padx=(0 if col == 0 else 28, 12))
+            ttk.Entry(g2, textvariable=var, width=9).grid(row=linha, column=col + 1, sticky="w", pady=3)
+            var.trace_add("write", lambda *_: self._ler_opcoes())
+        self.bt_padroes = ttk.Button(card, text="Restaurar padrões", style="Ghost.TButton",
+                                     command=self._restaurar_padroes)
+        self.bt_padroes.grid(row=0, column=0, sticky="ne")
+
+    def _restaurar_padroes(self):
+        if not self._confirmar_padroes:          # confirma no próprio botão, sem caixa de diálogo
+            self._confirmar_padroes = True
+            self.bt_padroes.configure(text="Clique de novo para restaurar")
+            self.after(4000, self._cancelar_padroes)
+            return
+        self._cancelar_padroes()
+        p = Opcoes()
+        o = self.op
+        o.limites, o.limiar_perda_pct, o.agrupamento, o.campo_id = p.limites, p.limiar_perda_pct, p.agrupamento, None
+        o.modo_linhas, o.simplificar_m, o.formato = p.modo_linhas, p.simplificar_m, p.formato
+        self.atualizar_tudo()
+        self.dizer("Opções restauradas.", "muted")
+
+    def _cancelar_padroes(self):
+        self._confirmar_padroes = False
+        self.bt_padroes.configure(text="Restaurar padrões")
+
+    def _carregar_opcoes_na_tela(self):
+        o = self.op
+        self._carregando = True
+        self.v_modo.set(o.modo_linhas)
+        self.v_simplificar.set(o.simplificar_m > 0)
+        self.v_metros.set(f"{o.simplificar_m:g}" if o.simplificar_m > 0 else "5")
+        self.v_formato.set(o.formato)
+        self.v_agrupar.set(o.agrupamento)
+        self.v_limiar.set(f"{o.limiar_perda_pct:g}".replace(".", ","))
+        self.v_campo_id.set(o.campo_id or "")
+        for chave, _, escala in LIMITES:
+            self.v_lim[chave].set(f"{getattr(o.limites, chave) / escala:g}".replace(".", ","))
+        self._carregando = False
+
+    def _ler_opcoes(self):
+        if getattr(self, "_carregando", False):
+            return
+        o = self.op
+        self.erros_opcoes = []
+
+        def numero(var, rot):
+            try:
+                return float(var.get().replace(",", "."))
+            except ValueError:
+                self.erros_opcoes.append(f"Valor inválido em \"{rot}\".")
+                return None
+
+        o.modo_linhas = self.v_modo.get()
+        o.formato = self.v_formato.get()
+        o.agrupamento = self.v_agrupar.get()
+        if self.v_simplificar.get():
+            m = numero(self.v_metros, "metros")
+            o.simplificar_m = m if m and m > 0 else 0.0
+        else:
+            o.simplificar_m = 0.0
+        lim = numero(self.v_limiar, "alertar se perder mais de")
+        if lim is not None:
+            o.limiar_perda_pct = lim
+        o.campo_id = self.v_campo_id.get().strip() or None
+        for chave, rot, escala in LIMITES:
+            v = numero(self.v_lim[chave], rot)
+            if v is not None and v > 0:
+                setattr(o.limites, chave, int(v * escala))
+            elif v is not None:
+                self.erros_opcoes.append(f"\"{rot}\" precisa ser maior que zero.")
+        self.validar()
+
+    # ================================================================ Resultado
+    def _pagina_resultado(self, card):
+        card.rowconfigure(4, weight=1)
+        self.res_titulo = ttk.Label(card, text="Ainda não processado", style="Title.Card.TLabel")
+        self.res_titulo.grid(row=0, column=0, sticky="w")
+        self.res_sub = ttk.Label(card, style="Muted.Card.TLabel", wraplength=640, justify="left", text=(
+            "Escolha os arquivos e clique em Processar. O resultado aparece aqui."))
+        self.res_sub.grid(row=1, column=0, sticky="w", pady=(2, 8))
+        self.res_avisos = ttk.Label(card, style="Warn.Card.TLabel", wraplength=640, justify="left")
+        self.res_avisos.grid(row=2, column=0, sticky="w")
+        ttk.Label(card, text="RELATÓRIO COMPLETO (também salvo em relatorio.txt)",
+                  style="Muted.Card.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 4))
+        caixa = ttk.Frame(card, style="Card.TFrame")
+        caixa.grid(row=4, column=0, sticky="nsew")
+        caixa.columnconfigure(0, weight=1)
+        caixa.rowconfigure(0, weight=1)
+        self.txt = caixa_texto(caixa, wrap="none", height=10)
+        self.txt.grid(row=0, column=0, sticky="nsew")
+        sy = ttk.Scrollbar(caixa, orient="vertical", command=self.txt.yview)
+        sy.grid(row=0, column=1, sticky="ns")
+        sx = ttk.Scrollbar(caixa, orient="horizontal", command=self.txt.xview)
+        sx.grid(row=1, column=0, sticky="ew")
+        self.txt.configure(yscrollcommand=sy.set, xscrollcommand=sx.set, state="disabled")
+
+    def mostrar_resultado(self, r):
+        n_mapas = len(r.plano.mapas)
+        n_arq = sum(len(m.arquivos) for m in r.plano.mapas)
+        self.res_titulo.configure(text=f"{n_mapas} mapa{'s' if n_mapas != 1 else ''} · "
+                                       f"{n_arq} arquivo{'s' if n_arq != 1 else ''} para importar")
+        mapas = "   ".join(f"{m.pasta}: {', '.join(m.territorios) or '-'}" for m in r.plano.mapas[:6])
+        self.res_sub.configure(text=(
+            "Para cada pasta Mapa_XX, crie um mapa no My Maps e importe cada arquivo como uma camada.\n"
+            + mapas + ("   …" if n_mapas > 6 else "")))
+        avisos = [l.strip()[2:] for l in r.relatorio.splitlines() if l.strip().startswith("! ")]
+        if avisos:
+            mais = f"\n… e mais {len(avisos) - 5} aviso(s) no relatório." if len(avisos) > 5 else ""
+            self.res_avisos.configure(text="Atenção:\n• " + "\n• ".join(avisos[:5]) + mais)
+        else:
+            self.res_avisos.configure(text="")
+        self._texto(r.relatorio)
+
+    def _texto(self, texto):
+        self.txt.configure(state="normal")
         self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", texto)
+        self.txt.configure(state="disabled")
+
+    # ================================================================ estado
+    def atualizar_tudo(self):
+        self.render_arquivos()
+        self.render_casas()
+        self._carregar_opcoes_na_tela()
+        self.erros_opcoes = []
+        self.validar()
+
+    def faltando(self) -> list[str]:
+        o, f = self.op, []
+        if not o.mapa_mestre:
+            f.append("o mapa-mestre")
+        if not o.territorios:
+            f.append("os territórios rurais")
+        if not o.linhas and not o.pontos:
+            f.append("trajetos ou casas")
+        if not o.saida:
+            f.append("a pasta de saída")
+        return f
+
+    def validar(self) -> bool:
+        if self.processando:
+            return False
+        erros = list(getattr(self, "erros_opcoes", []))
+        for p in self._csvs():
+            if p.filtro_coluna and not p.filtro_valores and (p.caminho, p.filtro_coluna) in self.valores:
+                erros.append(f"{os.path.basename(p.caminho)}: marque ao menos um valor para manter "
+                             "(página Casas) ou desligue o filtro.")
+            if p.caminho in self.lendo:
+                erros.append(f"Lendo {os.path.basename(p.caminho)}…")
+        falta = self.faltando()
+        ok = not erros and not falta
+        if erros:
+            self.dizer("\n".join(erros), "danger" if not erros[0].startswith("Lendo") else "muted")
+        elif falta:
+            self.dizer("Falta escolher " + ", ".join(falta) + ".", "muted")
+        elif not self.ultimo_resultado:
+            self.dizer("Tudo pronto. Clique em Processar.", "muted")
+        self.bt_processar.state(["!disabled"] if ok else ["disabled"])
+        existe = bool(self.op.saida) and os.path.isdir(self.op.saida)
+        self.bt_abrir.state(["!disabled"] if existe else ["disabled"])
+        return ok
+
+    def salvar_preferencias(self):
+        try:
+            preferencias.salvar(self.op)
+        except OSError:
+            pass   # lembrar é conveniência: nunca atrapalha o uso
+
+    # ================================================================ processar
+    def processar(self):
+        if not self.validar():
+            return
+        op = copy.deepcopy(self.op)
+        for p in op.pontos:
+            info = self.infos.get(p.caminho)
+            if info is not None:
+                p.csv = info.opcoes
+        self.salvar_preferencias()
+        self.processando = True
+        self.bt_processar.state(["disabled"])
+        self.dizer("Começando…", "muted")
+        self.inicio_proc = time.perf_counter()
 
         def trabalho():
             from ..pipeline import executar
             try:
-                r = executar(op, progresso=lambda m: self.fila.put(("status", m)))
-                self.fila.put(("fim", r))
-            except Exception as e:
-                self.fila.put(("erro", (e, traceback.format_exc())))
+                self.fila.put(("fim", executar(op, progresso=lambda m: self.fila.put(("status", m)))))
+            except Exception as exc:  # noqa: BLE001 - mostrado na tela
+                self.fila.put(("erro", (exc, traceback.format_exc())))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -281,45 +840,69 @@ class App(tk.Tk):
             while True:
                 tipo, valor = self.fila.get_nowait()
                 if tipo == "status":
-                    self.v_status.set(valor)
+                    self.dizer(valor, "muted")
                 elif tipo == "fim":
-                    self._terminar()
-                    self.bt_abrir.state(["!disabled"])
-                    self.txt.insert("1.0", valor.relatorio)
-                    self.nb.select(2)
-                    n_arq = sum(len(m.arquivos) for m in valor.plano.mapas)
-                    self.v_status.set(f"Concluído: {len(valor.plano.mapas)} mapa(s), {n_arq} arquivo(s) em "
-                                      f"{valor.pasta_saida}")
+                    self.processando = False
+                    self.ultimo_resultado = valor
+                    self.mostrar_resultado(valor)
+                    self.mostrar("Resultado")
+                    s = time.perf_counter() - self.inicio_proc
+                    self.validar()
+                    self.dizer(f"Concluído em {num(s, 1)} s. Arquivos em {encurtar(valor.pasta_saida, 50)}", "text")
                 elif tipo == "erro":
-                    self._terminar()
-                    e, tb = valor
-                    self.txt.insert("1.0", f"ERRO: {e}\n\nDetalhes técnicos:\n{tb}")
-                    self.nb.select(2)
-                    self.v_status.set("Erro no processamento.")
-                    messagebox.showerror("Recorta Mapas", f"Erro: {e}", parent=self)
+                    self.processando = False
+                    exc, tb = valor
+                    self.validar()
+                    self.dizer(f"Erro: {exc}", "danger")
+                    self.res_titulo.configure(text="Não foi possível processar")
+                    self.res_sub.configure(text=str(exc))
+                    self.res_avisos.configure(text="")
+                    self._texto(f"ERRO: {exc}\n\nDetalhes técnicos:\n{tb}")
+                    self.mostrar("Resultado")
+                elif tipo == "info":
+                    e, info = valor
+                    self.lendo.discard(e.caminho)
+                    if e in self.op.pontos:
+                        self.infos[e.caminho] = info
+                        e.csv = info.opcoes
+                        resolver_padroes(e, info)
+                        if e.filtro_coluna:
+                            self._ler_valores(e, e.filtro_coluna)
+                    self.render_casas()
+                    self.validar()
+                elif tipo == "info_erro":
+                    e, msg = valor
+                    self.lendo.discard(e.caminho)
+                    e._erro = f"Não foi possível ler {os.path.basename(e.caminho)}: {msg}"
+                    self.render_casas()
+                    self.validar()
+                elif tipo == "valores":
+                    chave, cont = valor
+                    self.lendo.discard(chave)
+                    self.valores[chave] = cont
+                    if self.pagina_atual == "Casas":
+                        self.render_casas()
+                    else:
+                        self._casas_sujo = True
+                    self.validar()
         except queue.Empty:
             pass
         self.after(100, self._ler_fila)
 
-    def _abrir_saida(self):
-        pasta = self.v_saida.get()
-        if not os.path.isdir(pasta):
-            return
-        if sys.platform.startswith("win"):
-            os.startfile(pasta)  # noqa: S606
-        else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", pasta])
+    def abrir_saida(self):
+        if self.op.saida and os.path.isdir(self.op.saida):
+            abrir_no_sistema(self.op.saida)
 
-    def _terminar(self):
-        self.prog.stop()
-        self.bt.state(["!disabled"])
+    def fechar(self):
+        self.salvar_preferencias()
+        self.destroy()
 
 
 def main():
-    if sys.platform.startswith("win"):
+    if IS_WINDOWS:
         try:  # texto nítido em telas com escala (125%, 150%...)
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     App().mainloop()
