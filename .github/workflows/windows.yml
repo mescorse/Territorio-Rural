@@ -41,7 +41,9 @@ jobs:
             --linhas exemplo\trajetos.kml --pontos exemplo\cnefe_exemplo.csv --saida teste_saida --formato kmz
           if ($LASTEXITCODE -ne 0) { throw "CLI falhou ($LASTEXITCODE)" }
           if (-not (Test-Path teste_saida\relatorio.txt)) { throw "relatorio.txt não foi gerado" }
-          if (-not (Test-Path teste_saida\Mapa_01\Territorios_rurais.kmz)) { throw "Mapa_01 incompleto" }
+          if (-not (Test-Path teste_saida\Mapa_01\Casas_rurais_*.kmz)) { throw "Mapa_01 sem casas" }
+          if (-not (Test-Path teste_saida\Mapa_01\Trajetos_*.kmz)) { throw "Mapa_01 sem trajetos" }
+          if (Test-Path teste_saida\Mapa_01\Territorios_rurais.kmz) { throw "contornos não deviam estar no mapa" }
           Get-ChildItem -Recurse teste_saida | Select-Object FullName, Length
 
       - name: Teste do executável com janela (abre e continua aberto)
