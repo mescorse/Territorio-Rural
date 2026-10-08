@@ -45,6 +45,20 @@ LIMITES = (
 )
 
 
+PACOTES = ("shapely", "lxml", "pyproj", "numpy")
+
+
+def pacotes_faltando() -> list[str]:
+    """Bibliotecas necessárias que não estão instaladas (sem importá-las: é instantâneo)."""
+    from importlib.util import find_spec
+    return [p for p in PACOTES if find_spec(p) is None]
+
+
+def mensagem_pacotes(faltando) -> str:
+    return (f"Falta instalar: {', '.join(faltando)}. Num terminal, na pasta do projeto, rode:  "
+            "py -m pip install -e .   (o RecortaMapas.exe já vem com tudo)")
+
+
 def eh_csv(caminho: str) -> bool:
     return os.path.splitext(caminho)[1].lower() in (".csv", ".txt", ".tsv")
 
@@ -80,6 +94,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.fechar)
 
         self.op: Opcoes = preferencias.carregar()
+        self.faltam_pacotes = pacotes_faltando()
         self.fila: queue.Queue = queue.Queue()
         self.infos: dict[str, object] = {}        # caminho do CSV -> InfoCSV
         self.valores: dict[tuple, object] = {}    # (caminho, coluna) -> Counter
@@ -100,7 +115,7 @@ class App(tk.Tk):
         self.mostrar("Arquivos")
         self.deiconify()
         dark_title_bar(self)
-        self.after(100, self._ler_fila)
+        self._timer = self.after(100, self._ler_fila)
         # Ler os CSV só depois que a janela aparece, para não atrasar a abertura.
         self.after(30, lambda: [self._inspecionar(p) for p in self.op.pontos if eh_csv(p.caminho)])
         self.tempo_abertura_ms = (time.perf_counter() - inicio) * 1000
@@ -360,8 +375,8 @@ class App(tk.Tk):
         self.lendo.add(caminho)
 
         def trabalho():
-            from ..io_csv import inspecionar
             try:
+                from ..io_csv import inspecionar
                 info = inspecionar(caminho, opcoes or e.csv)
                 self.fila.put(("info", (e, info)))
             except Exception as exc:  # noqa: BLE001 - mostrado na tela
@@ -379,8 +394,8 @@ class App(tk.Tk):
         self.lendo.add(chave)
 
         def trabalho():
-            from ..io_csv import valores_distintos
             try:
+                from ..io_csv import valores_distintos
                 self.fila.put(("valores", (chave, valores_distintos(e.caminho, info.opcoes, coluna))))
             except Exception as exc:  # noqa: BLE001
                 self.fila.put(("valores", (chave, exc)))
@@ -786,6 +801,8 @@ class App(tk.Tk):
         if self.processando:
             return False
         erros = list(getattr(self, "erros_opcoes", []))
+        if getattr(self, "faltam_pacotes", None):
+            erros.insert(0, mensagem_pacotes(self.faltam_pacotes))
         for p in self._csvs():
             if p.filtro_coluna and not p.filtro_valores and (p.caminho, p.filtro_coluna) in self.valores:
                 erros.append(f"{os.path.basename(p.caminho)}: marque ao menos um valor para manter "
@@ -827,8 +844,8 @@ class App(tk.Tk):
         self.inicio_proc = time.perf_counter()
 
         def trabalho():
-            from ..pipeline import executar
             try:
+                from ..pipeline import executar
                 self.fila.put(("fim", executar(op, progresso=lambda m: self.fila.put(("status", m)))))
             except Exception as exc:  # noqa: BLE001 - mostrado na tela
                 self.fila.put(("erro", (exc, traceback.format_exc())))
@@ -852,6 +869,8 @@ class App(tk.Tk):
                 elif tipo == "erro":
                     self.processando = False
                     exc, tb = valor
+                    if isinstance(exc, ModuleNotFoundError):
+                        exc = RuntimeError(mensagem_pacotes([exc.name]))
                     self.validar()
                     self.dizer(f"Erro: {exc}", "danger")
                     self.res_titulo.configure(text="Não foi possível processar")
@@ -887,7 +906,7 @@ class App(tk.Tk):
                     self.validar()
         except queue.Empty:
             pass
-        self.after(100, self._ler_fila)
+        self._timer = self.after(100, self._ler_fila)
 
     def abrir_saida(self):
         if self.op.saida and os.path.isdir(self.op.saida):
@@ -895,6 +914,7 @@ class App(tk.Tk):
 
     def fechar(self):
         self.salvar_preferencias()
+        self.after_cancel(self._timer)
         self.destroy()
 
 
