@@ -80,8 +80,9 @@ class App(tk.Tk):
         self.title("Recorta Mapas")
         aplicar_tema(self)
         self.configure(bg=THEME["side"])
-        self.geometry("1020x640")
-        self.minsize(940, 580)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{max(360, min(620, sw // 2 - 24))}x{max(380, min(640, sh - 90))}")
+        self.minsize(360, 380)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
 
         self.op: Opcoes = preferencias.carregar()
@@ -127,7 +128,7 @@ class App(tk.Tk):
             anchor="w", padx=12, pady=(0, 16))
         self.nav = {}
         for nome in self.PAGINAS:
-            b = ttk.Button(lado, text=nome, style="Nav.TButton", width=14,
+            b = ttk.Button(lado, text=nome, style="Nav.TButton", width=9,
                            command=lambda n=nome: self.mostrar(n))
             b.pack(fill="x", pady=1)
             self.nav[nome] = b
@@ -146,16 +147,27 @@ class App(tk.Tk):
         corpo.columnconfigure(0, weight=1)
         corpo.rowconfigure(0, weight=1)
         self.paginas = {}
+        self.conteudo_paginas = {}
         for nome in self.PAGINAS:
-            card = ttk.Frame(corpo, style="Card.TFrame", padding=(18, 14, 18, 8))
-            card.grid(row=0, column=0, sticky="nsew")
+            viewport = ttk.Frame(corpo, style="Card.TFrame")
+            viewport.grid(row=0, column=0, sticky="nsew")
+            canvas = tk.Canvas(viewport, bg=THEME["card"], bd=0, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            card = ttk.Frame(canvas, style="Card.TFrame", padding=(9, 9, 9, 6))
             card.columnconfigure(0, weight=1)
-            self.paginas[nome] = card
-        self._pagina_arquivos(self.paginas["Arquivos"])
-        self._pagina_casas(self.paginas["Casas"])
-        self._pagina_opcoes(self.paginas["Opções"])
-        self._pagina_avancado(self.paginas["Avançado"])
-        self._pagina_resultado(self.paginas["Resultado"])
+            window_id = canvas.create_window((0, 0), window=card, anchor="nw")
+            card.bind("<Configure>", lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.bind("<Configure>", lambda e, c=canvas, w=window_id: c.itemconfigure(w, width=e.width))
+            self.paginas[nome] = viewport
+            self.conteudo_paginas[nome] = card
+        self._pagina_arquivos(self.conteudo_paginas["Arquivos"])
+        self._pagina_casas(self.conteudo_paginas["Casas"])
+        self._pagina_opcoes(self.conteudo_paginas["Opções"])
+        self._pagina_avancado(self.conteudo_paginas["Avançado"])
+        self._pagina_resultado(self.conteudo_paginas["Resultado"])
 
         rodape = ttk.Frame(painel, style="Card.TFrame", padding=(18, 8, 10, 10))
         rodape.grid(row=1, column=0, sticky="ew")
