@@ -14,14 +14,14 @@ from tkinter import ttk
 IS_WINDOWS = sys.platform.startswith("win")
 
 THEME = {
-    "bg": "#0f1115",        # window
-    "side": "#0b0d10",      # sidebar
-    "card": "#171a21",      # panels
-    "field": "#1f232c",     # inputs
-    "hover": "#262b36",
-    "border": "#2a2f3a",
-    "text": "#e6e8ec",
-    "muted": "#8b93a1",
+    "bg": "#000000",        # window
+    "side": "#111111",      # sidebar
+    "card": "#161616",      # panels
+    "field": "#1A1A1A",     # inputs
+    "hover": "#242424",
+    "border": "#333333",
+    "text": "#F5F5F5",
+    "muted": "#B3B3B3",
     "accent": "#6d7cff",
     "accent_hover": "#8391ff",
     "danger": "#f87171",
