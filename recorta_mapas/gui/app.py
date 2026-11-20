@@ -17,7 +17,7 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from dnd_support import DropAwareTk, register_file_drop
+from .dnd_support import DropAwareTk, register_file_drop
 
 from .. import dependencias, preferencias
 from ..atributos import montar_nome, resolver_padroes
