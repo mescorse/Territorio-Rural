@@ -19,12 +19,25 @@ DND_AVAILABLE = _TK_DND is not None
 DropAwareTk = _TK_DND.Tk if DND_AVAILABLE else tk.Tk
 
 def register_file_drop(widget, callback) -> bool:
+    """Register a window-wide file target with visible hover feedback."""
     if not DND_AVAILABLE: return False
+    try: original_title = widget.title()
+    except (AttributeError, tk.TclError): original_title = ""
+    hovering = False
+    def feedback(active: bool) -> None:
+        nonlocal hovering
+        if hovering == active: return
+        hovering = active
+        try: widget.configure(cursor="plus" if active else "")
+        except (AttributeError, tk.TclError): pass
+        try: widget.title(f"Drop files to import — {original_title}" if active else original_title)
+        except (AttributeError, tk.TclError): pass
     widget.drop_target_register(DND_FILES)
-    widget.dnd_bind("<<DropEnter>>", lambda _e: "copy")
-    widget.dnd_bind("<<DropPosition>>", lambda _e: "copy")
-    widget.dnd_bind("<<DropLeave>>", lambda _e: None)
+    widget.dnd_bind("<<DropEnter>>", lambda _event: (feedback(True), "copy")[1])
+    widget.dnd_bind("<<DropPosition>>", lambda _event: "copy")
+    widget.dnd_bind("<<DropLeave>>", lambda _event: (feedback(False), None)[1])
     def _drop(event):
+        feedback(False)
         callback(tuple(str(x) for x in widget.tk.splitlist(event.data)))
         return getattr(event, "action", "copy") or "copy"
     widget.dnd_bind("<<Drop>>", _drop)
