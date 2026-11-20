@@ -17,6 +17,8 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from dnd_support import DropAwareTk, register_file_drop
+
 from .. import dependencias, preferencias
 from ..atributos import montar_nome, resolver_padroes
 from ..config import (
@@ -70,7 +72,7 @@ def abrir_no_sistema(caminho: str) -> None:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", caminho])
 
 
-class App(tk.Tk):
+class App(DropAwareTk):
     PAGINAS = ("Arquivos", "Casas", "Opções", "Avançado", "Resultado")
 
     def __init__(self):
@@ -84,6 +86,7 @@ class App(tk.Tk):
         self.geometry(f"{max(360, min(620, sw // 2 - 24))}x{max(380, min(640, sh - 90))}")
         self.minsize(360, 380)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
+        register_file_drop(self, self._handle_drop)
 
         self.op: Opcoes = preferencias.carregar()
         self.faltam_pacotes = dependencias.ausentes()   # rápido; versões são conferidas depois
@@ -273,14 +276,38 @@ class App(tk.Tk):
             self.op.saida = os.path.normpath(c)
             self.atualizar_tudo()
 
-    def _add_linhas(self):
-        for c in filedialog.askopenfilenames(parent=self, title="Trajetos", filetypes=TIPOS_KML,
-                                             initialdir=self._pasta_inicial()):
+    def _handle_drop(self, paths):
+        linhas = []
+        pontos = []
+        ignorados = []
+        for value in paths:
+            path = Path(value).expanduser()
+            if path.is_dir():
+                self.op.saida = os.path.normpath(str(path))
+            elif path.is_file() and path.suffix.lower() in {".kml", ".kmz"}:
+                linhas.append(str(path))
+            elif path.is_file() and path.suffix.lower() == ".csv":
+                pontos.append(str(path))
+            else:
+                ignorados.append(path.name or str(path))
+        if linhas:
+            self._add_linhas(linhas)
+        if pontos:
+            self._add_pontos(pontos)
+        if not linhas and not pontos:
+            self.atualizar_tudo()
+        if ignorados:
+            from tkinter import messagebox
+            messagebox.showwarning("Arquivos não suportados", "Solte arquivos KML/KMZ de trajetos, CSV de casas ou uma pasta de saída. Ignorados: " + ", ".join(ignorados), parent=self)
+
+    def _add_linhas(self, selected_paths=None):
+        selected_paths = selected_paths if selected_paths is not None else filedialog.askopenfilenames(parent=self, title="Trajetos", filetypes=TIPOS_KML, initialdir=self._pasta_inicial())
+        for c in selected_paths:
             self.op.linhas.append(EntradaLinhas(os.path.normpath(c)))
         self.atualizar_tudo()
 
-    def _add_pontos(self):
-        novos = filedialog.askopenfilenames(parent=self, title="Casas", filetypes=TIPOS_PONTOS,
+    def _add_pontos(self, selected_paths=None):
+        novos = selected_paths if selected_paths is not None else filedialog.askopenfilenames(parent=self, title="Casas", filetypes=TIPOS_PONTOS,
                                             initialdir=self._pasta_inicial())
         for c in novos:
             c = os.path.normpath(c)
