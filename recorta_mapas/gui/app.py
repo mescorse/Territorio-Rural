@@ -285,7 +285,12 @@ class App(DropAwareTk):
             if path.is_dir():
                 self.op.saida = os.path.normpath(str(path))
             elif path.is_file() and path.suffix.lower() in {".kml", ".kmz"}:
-                linhas.append(str(path))
+                if not self.op.mapa_mestre:
+                    self.op.mapa_mestre = os.path.normpath(str(path))
+                elif not self.op.territorios:
+                    self.op.territorios = os.path.normpath(str(path))
+                else:
+                    linhas.append(str(path))
             elif path.is_file() and path.suffix.lower() == ".csv":
                 pontos.append(str(path))
             else:
